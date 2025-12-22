@@ -204,19 +204,12 @@ with st.sidebar:
     
     industry = st.text_input("Industry / Keyword", value="Coffee Shop", placeholder="e.g. Gym, Dentist, Restaurant")
     
-    search_method = st.radio("Location Input Method", ["Enter Address", "Google Maps URL", "Enter Coordinates"])
+    search_method = st.radio("Location Input Method", [ "Google Maps URL", "Enter Coordinates"])
     
     lat, lon = None, None
     
-    if search_method == "Enter Address":
-        address = st.text_input("Location Address", value="Central Park, New York")
-        if address:
-            lat, lon = get_lat_lon_from_address(address)
-            if lat:
-                st.success(f"Found: {lat:.4f}, {lon:.4f}")
-            else:
-                st.warning("Address not found.")
-    elif search_method == "Google Maps URL":
+
+    if search_method == "Google Maps URL":
         url = st.text_input("Paste Google Maps Link", placeholder="https://maps.google.com/...")
         if url:
             with st.spinner("Parsing URL..."):
