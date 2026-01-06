@@ -609,7 +609,7 @@ with st.sidebar:
     st.write("---")
     st.header("PhantomBuster (Optional)")
 
-    pb_enabled = st.checkbox("Enable PhantomBuster", value=False)
+    pb_enabled = st.checkbox("Enable PhantomBuster", value=True)
     pb_api_key = st.text_input("PhantomBuster API Key", type="password", disabled=not pb_enabled)
     pb_agent_id = PHANTOMBUSTER_AGENT_ID
     st.text_input("PhantomBuster Agent ID", value=PHANTOMBUSTER_AGENT_ID, disabled=True)
@@ -626,7 +626,7 @@ with st.sidebar:
     st.write("---")
     st.header("Apify (Step 3: People from LinkedIn company URLs)")
 
-    apify_enabled = st.checkbox("Enable Apify", value=False)
+    apify_enabled = st.checkbox("Enable Apify", value=True)
     apify_token = st.text_input(
         "APIFY_TOKEN (fallback)",
         type="password",

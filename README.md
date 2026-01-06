@@ -58,6 +58,65 @@ Open the app (Streamlit will print the local URL, usually `http://localhost:8501
 
 ## How to use (workflow)
 
+## Logic flow (Mermaid)
+
+```mermaid
+flowchart TD
+  %% NOTE: This is the app's logic/data flow (not Streamlit UI rendering).
+
+  Start([Start]) --> Inputs
+
+  Inputs["Inputs\n- google_api_key\n- industry (keyword)\n- location: (lat,lon) from URL OR manual\n- radius\n- (optional) pb_enabled + pb_api_key + pb_market + pb_number_lines\n- (optional) apify_enabled + apify_token/env + apify_actor_id + max_items + profile_mode"] --> Validate
+
+  Validate{Valid inputs?} -->|no| StopInvalid([Stop: show validation error])
+  Validate -->|yes| NearbySearch
+
+  %% --- Step 1: Google Places search (Nearby Search + pagination)
+  NearbySearch["fetch_places(api_key, (lat,lon), radius, keyword)\nGET /place/nearbysearch\naccumulate results[]"] --> HasNext{next_page_token?}
+  HasNext -->|yes| WaitToken["sleep(2)\n(set params.pagetoken)"] --> NearbySearch
+  HasNext -->|no| ToDF
+
+  ToDF["process_basic_results(results)\n-> df businesses\nColumns:\nName, Rating, Address, lat, lon, Place ID,\nPhone='Pending...', Website='Pending...', Email='Pending...'"] --> EnrichLoop
+
+  %% --- Step 1b: Enrichment loop (Place Details + website email scraping)
+  EnrichLoop["enrich_data(df)\nfor each row (Place ID):"] --> Details
+  Details["get_place_details(place_id)\nGET /place/details\nfields=formatted_phone_number,website\n-> phone, website"] --> Email
+  Email["extract_email_from_website(website)\nGET website HTML\nregex emails\nfilter likely assets\n-> up to 3 deduped emails"] --> UpdateRow
+  UpdateRow["df.at[i,'Phone']=phone\n df.at[i,'Website']=website\n df.at[i,'Email']=email"] --> MoreRows{More rows?}
+  MoreRows -->|yes| Details
+  MoreRows -->|no| SaveEnriched
+
+  SaveEnriched["Store df_enriched in session_state\nEnable CSV export"] --> PBBranch
+
+  %% --- Optional Step 2: PhantomBuster
+  PBBranch{pb_enabled AND user clicks Launch Phantom?} -->|no| ApifyBranch
+  PBBranch -->|yes| FilterWebsite
+
+  FilterWebsite["Filter df_enriched -> df_with_website\nWebsite not empty / not 'Pending...'"] --> HasWeb{Any rows?}
+  HasWeb -->|no| PBStop([Stop: no companies with website])
+  HasWeb -->|yes| UploadTmp
+
+  UploadTmp["Upload df_with_website CSV bytes to tmpfiles.org\n-> spreadsheetUrl (download URL)"] --> PBLaunch
+  PBLaunch["PhantomBusterClient.launch_agent(agent_id, argument)\nargument={csvName:'result', market, spreadsheetUrl, numberOfLinesToProcess}\n-> containerId"] --> PBWait
+  PBWait["wait_for_container(containerId)\npoll /containers/fetch until finished/failed/timeout"] --> PBMeta
+  PBMeta["fetch_agent(agent_id)\n-> orgS3Folder, s3Folder"] --> PBDownload
+  PBDownload["Build S3 URL for result.csv\nDownload bytes\nParse as DataFrame"] --> PBFilter
+  PBFilter["_filter_pb_results_to_current_run(df_pb, df_with_website)\nMatch by domain (preferred) and name (fallback)"] --> ExtractLinkedIn
+  ExtractLinkedIn["_extract_linkedin_company_urls(df_pb_filtered)\nTraverse cells for linkedin.com/company URLs\n-> linkedin_company_urls[]"] --> StoreLinkedIn
+  StoreLinkedIn["Store:\n- df_pb_results_raw\n- df_pb_results (filtered)\n- linkedin_company_urls"] --> ApifyBranch
+
+  %% --- Optional Step 3: Apify People Scraper
+  ApifyBranch{apify_enabled AND user clicks Run Apify?} -->|no| End([End])
+  ApifyBranch -->|yes| BuildCompanies
+
+  BuildCompanies["companies = linkedin_company_urls\nnormalize + dedupe + validate"] --> HasCompanies{Any company URLs?}
+  HasCompanies -->|no| ApifyStop([Stop: no LinkedIn company URLs])
+  HasCompanies -->|yes| ApifyRun
+
+  ApifyRun["_run_apify_people_scraper(token, actor_id, companies)\nApifyClient.actor(actor_id).call(run_input)\nIterate dataset items\n-> people items[]"] --> PeopleDF
+  PeopleDF["df_people = DataFrame(items)\nStore df_people\nEnable People CSV export"] --> End
+```
+
 ### Step 1: Google Maps businesses + enrichment
 
 1. Enter **Google Maps API Key**
