@@ -1,74 +1,112 @@
-# Google Maps Business Extractor
+# Business Extractor (Google Maps → PhantomBuster → Apify)
 
-A Streamlit application that extracts business information (leads) from Google Maps based on industry and location. It fetches basic information using the Google Places API and attempts to enrich the data by finding phone numbers and scraping email addresses from business websites.
+A Streamlit app (`test.py`) that helps generate lead lists by:
 
-## Features
+- **Step 1**: finding businesses near a location via **Google Places Nearby Search**
+- **Step 1b**: enriching each business with **phone + website** (Places Details) and best-effort **email extraction** (website scraping)
+- **Optional Step 2**: sending the enriched CSV (filtered to rows with a Website) to **PhantomBuster**
+- **Optional Step 3**: taking LinkedIn **company URLs** from Phantom results and running an **Apify Actor** to fetch people, then exporting a people CSV
 
-- **Search by Location**: Use a Google Maps URL or enter specific coordinates (Latitude/Longitude).
-- **Keyword Search**: Filter businesses by industry or keyword (e.g., "Coffee Shop", "Gym", "Dentist").
-- **Radius Control**: Adjustable search radius (from 100m to 50km).
-- **Data Enrichment**:
-  - Fetches formatted phone numbers and websites via Google Places Details API.
-  - Scrapes business websites to find contact email addresses.
-- **Visualizations**: Interactive map view using PyDeck and a sortable data table.
-- **Export**: Download the enriched dataset as a CSV file.
+## Current features (as implemented in `test.py`)
 
-## Prerequisites
+- **Google Places search**
+  - Location input: **Google Maps URL** (extracts `@lat,lon`) or **manual coordinates**
+  - Keyword/industry search
+  - Radius: **100m → 50km**
+  - Pagination support (collects multiple pages)
+- **Enrichment**
+  - Phone + Website via **Place Details**
+  - Email extraction by scanning website HTML with a simple regex
+  - Live progress updates in the UI; table refreshes periodically to reduce flicker
+- **UI**
+  - Map view via **PyDeck** + data table
+  - CSV export of the enriched businesses
+- **PhantomBuster (optional)**
+  - Uploads the “companies with website” CSV to `tmpfiles.org`
+  - Launches a PhantomBuster agent (Agent ID is hard-coded in the app)
+  - Downloads `result.csv` from PhantomBuster S3 and extracts LinkedIn company URLs
+- **Apify (optional)**
+  - Runs an Apify Actor (default Actor ID in the UI) using the extracted LinkedIn company URLs
+  - Shows results in a table and exports a CSV
 
-- **Python 3.8+**
-- **Google Maps API Key**: You need a valid API Key with the following APIs enabled:
-  - **Places API (New)** or **Places API** (for Nearby Search and Place Details)
+## Requirements
+
+- **Python 3.9+** recommended
+- A **Google Maps API Key** with:
+  - **Places API** enabled (Nearby Search + Place Details)
+- Optional integrations:
+  - **PhantomBuster API Key** (if using Step 2)
+  - **Apify token** (if using Step 3)
 
 ## Installation
 
-1. Clone the repository or navigate to the project directory:
-   ```bash
-   cd maps
-   ```
+From this folder:
 
-2. Install the required dependencies:
-   ```bash
-   pip install -r requirements.txt
-   ```
-   *If `requirements.txt` is not available, install manually:*
-   ```bash
-   pip install streamlit pandas requests pydeck geopy
-   ```
+```bash
+python -m venv .venv
+source .venv/bin/activate
+pip install -r requirements.txt
+```
 
-## Usage
+## Run
 
-1. Run the Streamlit app:
-   ```bash
-   streamlit run test.py
-   ```
+```bash
+streamlit run test.py
+```
 
-2. The application will open in your default web browser (usually at `http://localhost:8501`).
+Open the app (Streamlit will print the local URL, usually `http://localhost:8501`).
 
-3. **Enter your Google Maps API Key** in the sidebar.
+## How to use (workflow)
 
-4. **Configure Search**:
-   - Enter an Industry/Keyword.
-   - Choose a Location Method (Paste a Google Maps URL or enter Lat/Lon manually).
-   - Adjust the Search Radius.
+### Step 1: Google Maps businesses + enrichment
 
-5. Click **Find Businesses**.
+1. Enter **Google Maps API Key**
+2. Pick **Industry / Keyword**
+3. Pick location input method:
+   - **Google Maps URL**: paste a URL containing `@lat,lon` (short URLs are expanded)
+   - **Enter Coordinates**: type latitude/longitude
+4. Set **Search Radius**
+5. Click **Find Businesses**
 
-6. Wait for the process to complete:
-   - The app will first fetch the list of businesses.
-   - It will then proceed to "enrich" the data by fetching phone numbers and scraping emails.
-   - Progress is displayed in real-time.
+The app will:
 
-7. **Export Data**: Once complete, click the "Export to CSV" button to download your leads.
+- fetch businesses (Nearby Search)
+- enrich each row (Place Details + optional email scraping)
+- allow **Export to CSV**
 
-## Disclaimer
+### Optional Step 2: PhantomBuster
 
-This tool is for educational and legitimate business intelligence purposes.
-- **Google Maps Platform Terms**: Ensure you comply with Google Maps Platform Terms of Service regarding caching and data usage.
-- **Web Scraping**: The email extraction feature involves web scraping. Respect `robots.txt` policies and do not use this tool for spamming or unauthorized data collection.
+1. In the sidebar, enable **PhantomBuster**
+2. Enter your **PhantomBuster API Key**
+3. Click **Launch Phantom**
 
-## File Structure
+Notes:
 
-- `test.py`: Main application script.
-- `requirements.txt`: Python dependencies.
+- The app sends only companies where `Website` is present (not empty / not “Pending…”).
+- The app expects Phantom results to be available as **`result.csv`** in the agent’s S3 folder, then filters those results back to the current run and extracts **LinkedIn company URLs**.
 
+### Optional Step 3: Apify (people from LinkedIn company URLs)
 
+1. In the sidebar, enable **Apify**
+2. Provide an Apify token (recommended via env var `APIFY_TOKEN`, UI field is fallback)
+3. Click **Run Apify (People)**
+
+Output:
+
+- a table of people results
+- a downloadable **people CSV**
+
+## Configuration / environment variables
+
+- **`APIFY_TOKEN`**: recommended way to provide the Apify token for Step 3.
+
+## Data + compliance notes
+
+- **Google Maps Platform ToS**: ensure your usage (storage/caching/redistribution) complies with Google’s terms.
+- **Scraping**: email extraction is best-effort HTML scanning and may violate site policies; respect `robots.txt` / local laws and do not use for spam.
+- **Secrets**: do not commit API keys. Prefer environment variables where possible.
+
+## Project files
+
+- `test.py`: the Streamlit app (Step 1 + optional Step 2/3)
+- `requirements.txt`: dependencies
