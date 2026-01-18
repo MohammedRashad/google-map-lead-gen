@@ -56,6 +56,42 @@ streamlit run test.py
 
 Open the app (Streamlit will print the local URL, usually `http://localhost:8501`).
 
+## FastAPI API
+
+Run the API:
+
+```bash
+uvicorn fastapi_app:app --reload --port 8000
+```
+
+Example request:
+
+```bash
+curl -X POST http://127.0.0.1:8000/run \
+  -H "Content-Type: application/json" \
+  -d '{
+    "google_api_key": "YOUR_GOOGLE_KEY",
+    "industry": "Coffee Shop",
+    "radius_m": 1000,
+    "location": {
+      "maps_url": "https://www.google.com/maps/place/.../@40.748,-73.985,17z"
+    },
+    "enrich": true,
+    "phantom": {
+      "enabled": false,
+      "api_key": "YOUR_PHANTOM_KEY"
+    },
+    "apify": {
+      "enabled": false,
+      "token": "YOUR_APIFY_TOKEN"
+    }
+  }'
+```
+
+Notes:
+- Provide one of `maps_url`, `address`, or `latitude`+`longitude` in `location`.
+- Enable PhantomBuster/Apify only if you want Steps 2/3 to run.
+
 ## How to use (workflow)
 
 ## Logic flow (Mermaid)
