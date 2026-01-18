@@ -1,7 +1,7 @@
-geopy==2.4.1
-pandas==2.3.3
-Requests==2.32.5
-streamlit==1.33.0
+geopy
+pandas
+Requests
+streamlit
 apify-client
-fastapi==0.115.6
-uvicorn==0.30.6
+fastapi
+uvicorn
