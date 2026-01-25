@@ -4,4 +4,4 @@ Requests
 streamlit
 apify-client
 fastapi
-uvicorn
+uvicorn 
