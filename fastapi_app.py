@@ -49,6 +49,24 @@ class ApifyConfig(BaseModel):
     company_batch_mode: str = "all_at_once"
 
 
+class BusinessesRequest(BaseModel):
+    apiKey: str
+    keyword: str
+    lat: float
+    lon: float
+    radius: int = 1000
+    pageSize: int = 20
+    pageIndex: int = 0
+    pageToken: Optional[str] = None
+
+
+class ContactsRequest(BaseModel):
+    domain: Optional[str] = None
+    placeId: Optional[str] = None
+    address: Optional[str] = None
+    apiKey: Optional[str] = None
+
+
 class RunRequest(BaseModel):
     google_api_key: str
     industry: str
@@ -127,6 +145,59 @@ def extract_email_from_website(website_url: Optional[str]) -> Optional[str]:
     except Exception:
         pass
     return None
+
+
+def _parse_address_parts(address: Optional[str]) -> Tuple[Optional[str], Optional[str], Optional[str]]:
+    if not address:
+        return None, None, None
+    parts = [p.strip() for p in address.split(",") if p.strip()]
+    if not parts:
+        return None, None, None
+    country = parts[-1] if len(parts) >= 1 else None
+    state = parts[-2] if len(parts) >= 2 else None
+    city = parts[-3] if len(parts) >= 3 else None
+    return country, city, state
+
+
+def _email_to_name(email: str) -> Tuple[Optional[str], Optional[str]]:
+    local = (email or "").split("@")[0]
+    local = re.sub(r"[^a-zA-Z0-9._-]+", " ", local)
+    parts = [p for p in re.split(r"[._-]+", local) if p]
+    if not parts:
+        return None, None
+    if len(parts) == 1:
+        return parts[0].capitalize(), None
+    return parts[0].capitalize(), parts[-1].capitalize()
+
+
+def fetch_places_page(
+    api_key: str,
+    location: Tuple[float, float],
+    radius: int,
+    keyword: str,
+    page_token: Optional[str] = None,
+) -> Tuple[list[dict], Optional[str]]:
+    url = "https://maps.googleapis.com/maps/api/place/nearbysearch/json"
+    if page_token:
+        params = {"pagetoken": page_token, "key": api_key}
+    else:
+        params = {
+            "location": f"{location[0]},{location[1]}",
+            "radius": radius,
+            "keyword": keyword,
+            "key": api_key,
+        }
+
+    response = requests.get(url, params=params, timeout=20)
+    if response.status_code != 200:
+        raise RuntimeError(f"Google Places API error: {response.text}")
+    data = response.json()
+    status = (data.get("status") or "").upper()
+    if status not in {"OK", "ZERO_RESULTS"}:
+        if status == "INVALID_REQUEST" and page_token:
+            raise RuntimeError("next_page_token not ready; wait 2 seconds and retry")
+        raise RuntimeError(f"Google Places API error: {data}")
+    return data.get("results", []), data.get("next_page_token")
 
 
 def fetch_places(api_key: str, location: Tuple[float, float], radius: int, keyword: str) -> list[dict]:
@@ -510,9 +581,153 @@ def _df_to_records(df: pd.DataFrame) -> list[dict]:
     return safe_df.to_dict(orient="records")
 
 
+def _business_item_from_place(place: dict, api_key: str) -> dict:
+    loc = place.get("geometry", {}).get("location", {})
+    place_id = place.get("place_id")
+    phone, website = get_place_details(place_id, api_key) if place_id else (None, None)
+    domain = _normalize_domain(website or "")
+    address = place.get("vicinity") or place.get("formatted_address")
+    country, city, state = _parse_address_parts(address)
+    return {
+        "id": place_id,
+        "name": place.get("name"),
+        "domain": domain,
+        "lat": loc.get("lat"),
+        "lon": loc.get("lng"),
+        "placeId": place_id,
+        "rating": place.get("rating"),
+        "phone": phone,
+        "employeesCount": None,
+        "linkedinUrl": None,
+        "country": country or "",
+        "city": city,
+        "state": state,
+        "industry": place.get("types", [None])[0] if place.get("types") else None,
+    }
+
+
+def _contacts_from_emails(emails: list[str]) -> list[dict]:
+    contacts: list[dict] = []
+    for email in emails:
+        first_name, last_name = _email_to_name(email)
+        contacts.append(
+            {
+                "id": email,
+                "email": email,
+                "firstName": first_name,
+                "lastName": last_name,
+                "linkedinUrl": None,
+                "country": None,
+                "city": None,
+                "state": None,
+                "jobTitle": None,
+            }
+        )
+    return contacts
+
+
 @app.get("/health")
 def health() -> dict:
     return {"status": "ok"}
+
+
+@app.get("/businesses")
+def get_businesses(
+    apiKey: str,
+    keyword: str,
+    lat: float,
+    lon: float,
+    radius: int = 1000,
+    pageSize: int = 20,
+    pageIndex: int = 0,
+    pageToken: Optional[str] = None,
+) -> dict:
+    if not apiKey:
+        raise HTTPException(status_code=400, detail="apiKey is required")
+    if not keyword:
+        raise HTTPException(status_code=400, detail="keyword is required")
+    if pageIndex > 0 and not pageToken:
+        raise HTTPException(
+            status_code=400,
+            detail="pageToken is required when pageIndex > 0. Use nextPageToken from the previous response.",
+        )
+
+    try:
+        raw_results, next_page_token = fetch_places_page(
+            api_key=apiKey,
+            location=(lat, lon),
+            radius=int(radius),
+            keyword=keyword,
+            page_token=pageToken,
+        )
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+
+    if pageSize > 0:
+        raw_results = raw_results[: int(pageSize)]
+
+    items = [_business_item_from_place(place, apiKey) for place in raw_results]
+    return {
+        "items": items,
+        "totalCount": len(items),
+        "nextPageToken": next_page_token,
+    }
+
+
+@app.post("/businesses")
+def post_businesses(request: BusinessesRequest) -> dict:
+    return get_businesses(
+        apiKey=request.apiKey,
+        keyword=request.keyword,
+        lat=request.lat,
+        lon=request.lon,
+        radius=request.radius,
+        pageSize=request.pageSize,
+        pageIndex=request.pageIndex,
+        pageToken=request.pageToken,
+    )
+
+
+@app.get("/contacts")
+def get_contacts(
+    domain: Optional[str] = None,
+    placeId: Optional[str] = None,
+    address: Optional[str] = None,
+    apiKey: Optional[str] = None,
+) -> list[dict]:
+    website = None
+    if placeId:
+        if not apiKey:
+            raise HTTPException(status_code=400, detail="apiKey is required when placeId is provided")
+        _, website = get_place_details(placeId, apiKey)
+
+    if not website and domain:
+        website = domain.strip()
+        if not website.startswith(("http://", "https://")):
+            website = f"https://{website}"
+
+    if not website and address:
+        raise HTTPException(
+            status_code=400,
+            detail="address alone is not supported yet; provide domain or placeId",
+        )
+
+    if not website:
+        raise HTTPException(status_code=400, detail="Provide domain or placeId to fetch contacts")
+
+    emails_str = extract_email_from_website(website)
+    emails = [e.strip() for e in (emails_str or "").split(",") if e.strip()]
+    return _contacts_from_emails(emails)
+
+
+@app.post("/contacts")
+def post_contacts(request: ContactsRequest) -> list[dict]:
+    return get_contacts(
+        domain=request.domain,
+        placeId=request.placeId,
+        address=request.address,
+        apiKey=request.apiKey,
+    )
 
 
 @app.post("/run")
