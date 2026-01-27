@@ -65,6 +65,9 @@ class ContactsRequest(BaseModel):
     placeId: Optional[str] = None
     address: Optional[str] = None
     apiKey: Optional[str] = None
+    phantom: Optional[PhantomConfig] = None
+    apify: Optional[ApifyConfig] = None
+    linkedin_company_urls: Optional[list[str]] = None
 
 
 class RunRequest(BaseModel):
@@ -626,6 +629,42 @@ def _contacts_from_emails(emails: list[str]) -> list[dict]:
     return contacts
 
 
+def _normalize_apify_contacts(items: list[dict]) -> list[dict]:
+    contacts: list[dict] = []
+    for item in items:
+        email = item.get("email")
+        if not email and isinstance(item.get("emails"), list) and item["emails"]:
+            email = item["emails"][0]
+
+        first_name = item.get("firstName")
+        last_name = item.get("lastName")
+        if not (first_name or last_name):
+            full_name = item.get("fullName") or item.get("name")
+            if full_name and isinstance(full_name, str):
+                parts = [p for p in full_name.split(" ") if p]
+                if parts:
+                    first_name = parts[0]
+                    last_name = parts[-1] if len(parts) > 1 else None
+
+        linkedin_url = item.get("linkedinUrl") or item.get("profileUrl")
+        job_title = item.get("jobTitle") or item.get("title")
+
+        contacts.append(
+            {
+                "id": item.get("id") or email or linkedin_url,
+                "email": email,
+                "firstName": first_name,
+                "lastName": last_name,
+                "linkedinUrl": linkedin_url,
+                "country": item.get("country"),
+                "city": item.get("city"),
+                "state": item.get("state"),
+                "jobTitle": job_title,
+            }
+        )
+    return contacts
+
+
 @app.get("/health")
 def health() -> dict:
     return {"status": "ok"}
@@ -722,12 +761,112 @@ def get_contacts(
 
 @app.post("/contacts")
 def post_contacts(request: ContactsRequest) -> list[dict]:
-    return get_contacts(
-        domain=request.domain,
-        placeId=request.placeId,
-        address=request.address,
-        apiKey=request.apiKey,
-    )
+    website = None
+    if request.placeId:
+        if not request.apiKey:
+            raise HTTPException(status_code=400, detail="apiKey is required when placeId is provided")
+        _, website = get_place_details(request.placeId, request.apiKey)
+
+    if not website and request.domain:
+        website = request.domain.strip()
+        if not website.startswith(("http://", "https://")):
+            website = f"https://{website}"
+
+    if not website and request.address:
+        raise HTTPException(
+            status_code=400,
+            detail="address alone is not supported yet; provide domain or placeId",
+        )
+
+    if not website:
+        raise HTTPException(status_code=400, detail="Provide domain or placeId to fetch contacts")
+
+    df = pd.DataFrame([{"Name": request.domain or request.placeId or "", "Website": website}])
+
+    phantom_cfg = request.phantom or PhantomConfig(enabled=False)
+    linkedin_company_urls: list[str] = []
+    if phantom_cfg.enabled:
+        if not phantom_cfg.api_key:
+            raise HTTPException(status_code=400, detail="phantom.api_key is required when phantom.enabled is true")
+
+        pb = PhantomBusterClient(api_key=phantom_cfg.api_key, org_id=None)
+
+        website_str = df["Website"].fillna("").astype(str).str.strip()
+        df_with_website = df[
+            (website_str != "") & (~website_str.str.lower().isin({"pending...", "none", "nan"}))
+        ].copy()
+
+        if df_with_website.empty:
+            raise HTTPException(
+                status_code=400,
+                detail="No companies with a Website found; PhantomBuster will not run.",
+            )
+
+        data = _df_to_csv_bytes(df_with_website)
+        spreadsheet_url = pb.upload_bytes_to_tmpfiles("enriched_results_with_website.csv", data)
+
+        argument = _build_phantom_argument(
+            spreadsheet_url=spreadsheet_url,
+            csv_name="result",
+            market=phantom_cfg.market,
+            number_of_lines_to_process=int(phantom_cfg.number_of_lines_to_process),
+        )
+
+        launch_resp = pb.launch_agent(agent_id=phantom_cfg.agent_id, argument=argument)
+        container_id = str(launch_resp.get("containerId") or "")
+        if not container_id:
+            raise HTTPException(status_code=502, detail=f"Phantom launch missing containerId: {launch_resp}")
+
+        final_container = pb.wait_for_container(container_id, poll_s=5, timeout_s=15 * 60)
+
+        agent_meta = pb.fetch_agent(phantom_cfg.agent_id)
+        org_s3 = agent_meta.get("orgS3Folder")
+        s3 = agent_meta.get("s3Folder")
+        if not org_s3 or not s3:
+            raise HTTPException(status_code=502, detail="Phantom agent metadata missing orgS3Folder/s3Folder")
+
+        result_url = pb.build_result_download_url(
+            org_s3_folder=str(org_s3),
+            s3_folder=str(s3),
+            filename="result",
+            ext="csv",
+        )
+        result_bytes = pb.download_bytes(result_url)
+
+        df_pb = _read_pb_results_bytes_as_df(result_bytes, "csv")
+        if df_pb is not None:
+            df_pb_filtered = _filter_pb_results_to_current_run(df_pb, df_with_website)
+            linkedin_company_urls = _extract_linkedin_company_urls(df_pb_filtered)
+        else:
+            txt = result_bytes.decode("utf-8", errors="replace")
+            linkedin_company_urls = _extract_linkedin_company_urls(txt)
+
+    if request.linkedin_company_urls:
+        linkedin_company_urls.extend(request.linkedin_company_urls)
+
+    apify_cfg = request.apify or ApifyConfig(enabled=False)
+    if not apify_cfg.enabled:
+        raise HTTPException(status_code=400, detail="apify.enabled must be true to fetch contacts via Apify")
+
+    token = (os.getenv("APIFY_TOKEN") or apify_cfg.token or "").strip()
+    companies = [c for c in linkedin_company_urls if _is_linkedin_company_url(c)]
+    companies = list(dict.fromkeys(companies))
+    if not companies:
+        raise HTTPException(status_code=400, detail="No LinkedIn company URLs available for Apify.")
+
+    try:
+        items, _run_meta = _run_apify_people_scraper(
+            token=token,
+            actor_id=apify_cfg.actor_id,
+            companies=companies,
+            max_items=int(apify_cfg.max_items),
+            profile_scraper_mode=apify_cfg.profile_scraper_mode,
+            company_batch_mode=apify_cfg.company_batch_mode,
+        )
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+
+    return _normalize_apify_contacts(items)
 
 
 @app.post("/run")
